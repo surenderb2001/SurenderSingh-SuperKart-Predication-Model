@@ -14,7 +14,9 @@ superkart_api = Flask('SuperKart')
 superkart_api.config['MAX_CONTENT_LENGTH'] = 5 * 1024 * 1024
 ALIASES = {'Product_Id_char': 'Product_Category', 'Product_Type_Category': 'Product_Category_Type'}
 
-def prepare_input(frame):
+# failuremode-handling start
+# Reject an invalid file structure before checking its individual products.
+def prepare_columns(frame):
     if frame.empty:
         raise ValueError('Provide at least one product.')
     for old, new in ALIASES.items():
@@ -24,7 +26,11 @@ def prepare_input(frame):
     missing = sorted(set(schema['features']) - set(frame.columns))
     if missing:
         raise ValueError('Missing columns: ' + ', '.join(missing))
-    frame = frame.loc[:, schema['features']].copy()
+    return frame.loc[:, schema['features']].copy()
+
+def prepare_input(frame):
+    frame = prepare_columns(frame)
+    # ailuremode-handling end
     frame['Product_Sugar_Content'] = frame['Product_Sugar_Content'].replace({'reg': 'Regular'})
     if frame.isna().any().any():
         raise ValueError('Input contains missing values.')
@@ -60,11 +66,29 @@ def predict_sales():
 
 @superkart_api.post('/v1/predictbatch')
 def predict_sales_batch():
+    # failuremode-handling start
+    # Keep one result per input row, even when some products cannot be predicted.
     if 'file' not in request.files:
         raise ValueError('Upload a CSV using the file field.')
-    frame = prepare_input(pd.read_csv(request.files['file']))
-    predictions = model.predict(frame)
-    return jsonify({str(index): float(value) for index, value in enumerate(predictions)})
+    frame = prepare_columns(pd.read_csv(request.files['file']))
+    results, valid_frames, valid_positions = [], [], []
+    for position in range(len(frame)):
+        result = {'row': position, 'status': 'rejected', 'predicted_sales': None, 'error': None}
+        try:
+            prepared = prepare_input(frame.iloc[[position]])
+        except (ValueError, TypeError, OverflowError) as error:
+            result['error'] = str(error)
+        else:
+            result['status'] = 'success'
+            valid_frames.append(prepared)
+            valid_positions.append(position)
+        results.append(result)
+    if valid_frames:
+        predictions = model.predict(pd.concat(valid_frames, ignore_index=True))
+        for position, prediction in zip(valid_positions, predictions):
+            results[position]['predicted_sales'] = float(prediction)
+    return jsonify(results)
+    # ailuremode-handling end
 
 @superkart_api.errorhandler(ValueError)
 @superkart_api.errorhandler(BadRequest)
