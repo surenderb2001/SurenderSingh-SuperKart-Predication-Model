@@ -60,7 +60,17 @@ with batch_tab:
             from io import BytesIO
             input_frame = pd.read_csv(BytesIO(raw))
             result = api_request('POST', '/v1/predictbatch', files={'file': (uploaded_file.name, raw, 'text/csv')})
-            input_frame['Predicted_Sales'] = [result[str(index)] for index in range(len(input_frame))]
+            # failuremode-handling start
+            # Match every returned result to its original CSV row, including rejected products.
+            if not isinstance(result, list) or len(result) != len(input_frame):
+                raise ValueError('Unexpected batch response. Update the backend and frontend together.')
+            row_results = pd.DataFrame(result).sort_values('row').reset_index(drop=True)
+            if row_results['row'].tolist() != list(range(len(input_frame))):
+                raise ValueError('The API returned incomplete or duplicate row results.')
+            input_frame['Prediction_Status'] = row_results['status']
+            input_frame['Predicted_Sales'] = row_results['predicted_sales']
+            input_frame['Prediction_Error'] = row_results['error']
+            # ailuremode-handling end
             st.session_state['batch_results'] = input_frame
             st.session_state['batch_source'] = raw
         except (requests.RequestException, ValueError, KeyError) as error:
@@ -68,5 +78,14 @@ with batch_tab:
             st.error(str(error))
     if uploaded_file is not None and st.session_state.get('batch_source') == uploaded_file.getvalue() and 'batch_results' in st.session_state:
         results = st.session_state['batch_results']
+        # failuremode-handling start
+        # Summarize successful and rejected products while keeping both in the downloaded CSV.
+        if 'Prediction_Status' in results:
+            accepted = int((results['Prediction_Status'] == 'success').sum())
+            rejected = len(results) - accepted
+            st.write(f'Predicted: {accepted} | Rejected: {rejected}')
+            if rejected:
+                st.warning('Some rows were rejected. Their predictions are blank; see Prediction Error.')
+        # ailuremode-handling end
         st.dataframe(results, use_container_width=True, hide_index=True)
         st.download_button('Download Predictions', results.to_csv(index=False), 'superkart_predictions.csv', 'text/csv')
